@@ -1,0 +1,3 @@
+;; -*- Gerbil -*-
+
+(import :std/foreign)
