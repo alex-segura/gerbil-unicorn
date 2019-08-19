@@ -3,15 +3,24 @@
 (import :std/error
         :std/foreign
         :std/format
-        :gerbil/gambit
-
-        :unicorn/arm64
-        :unicorn/arm
-        :unicorn/x86)
+        :gerbil/gambit)
 
 (export version
+        version-string
         architecture-supported?
-        make-engine
+        uc-open
+        uc-close
+        with-emulator
+        start-emulation
+        stop-emulation
+        write-register
+        read-register
+        write-memory
+        read-memory
+        add-hook
+        remove-hook
+        map-memory
+        unmap-memory
 
         UC_ARCH_ARM
         UC_ARCH_ARM64
@@ -43,29 +52,6 @@
         UC_MODE_SPARC64
         UC_MODE_V9
 
-        UC_ERR_OK
-        UC_ERR_NOMEM
-        UC_ERR_ARCH
-        UC_ERR_HANDLE
-        UC_ERR_MODE
-        UC_ERR_VERSION
-        UC_ERR_READ_UNMAPPED
-        UC_ERR_WRITE_UNMAPPED
-        UC_ERR_FETCH_UNMAPPED
-        UC_ERR_HOOK
-        UC_ERR_INSN_INVALID
-        UC_ERR_MAP
-        UC_ERR_WRITE_PROT
-        UC_ERR_READ_PROT
-        UC_ERR_FETCH_PROT
-        UC_ERR_ARG
-        UC_ERR_READ_UNALIGNED
-        UC_ERR_WRITE_UNALIGNED
-        UC_ERR_FETCH_UNALIGNED
-        UC_ERR_HOOK_EXIST
-        UC_ERR_RESOURCE
-        UC_ERR_EXCEPTION
-
         UC_HOOK_INTR
         UC_HOOK_INSN
         UC_HOOK_CODE
@@ -81,11 +67,6 @@
         UC_HOOK_MEM_FETCH
         UC_HOOK_MEM_READ_AFTER)
 
-(defstruct (unicorn-error <error>) (error-code error-message))
-
-(def (raise-unicorn-error code)
-  (raise (make-unicorn-error code (uc_strerror code))))
-
 (def (version)
   (def combined (uc_version))
   (def major (##fxarithmetic-shift-right combined 8))
@@ -99,103 +80,142 @@
 (def (architecture-supported? arch)
   (uc_arch_supported arch))
 
-(defstruct engine (uc unicorn-version hooks)
-  final: #t
-  constructor: :init!)
+(defstruct (unicorn-error <error>) ())
 
-(defmethod {:init! engine}
-  (lambda (self arch: arch mode: mode)
-    (def uc (uc_make_engine arch mode))
-    (unless uc
-      (raise-unicorn-error UC_ERR_ARG))
-    (set! (engine-uc self) uc)
-    (set! (engine-unicorn-version self) (version))
-    (set! (engine-hooks self) (make-hash-table))))
+(def (raise-unicorn-error where code)
+  (raise (make-unicorn-error (uc_strerror code) [code] where)))
 
-(defmethod {write-register engine}
-  (lambda (self register value)
-    (with ((engine uc _ _) self)
-      (let (err (uc_reg_write uc register value))
-        (unless (= err UC_ERR_OK)
-          (raise-unicorn-error err))))))
+(def uc-engine (make-parameter #f))
 
-(defmethod {read-register engine}
-  (lambda (self register)
-    (with ((engine uc _ _) self)
-      (uc_reg_read uc register))))
-
-(defmethod {write-memory engine}
-  (lambda (self address bytes)
-    (with ((engine uc _ _) self)
-      (uc_mem_write uc address bytes))))
-
-(defmethod {read-memory engine}
-  (lambda (self address size)
-    (def uc (engine-uc self))
-    (let (bytes (make-u8vector size))
-      (let (err (uc_mem_read uc address bytes size))
-        (if (= err UC_ERR_OK)
-          bytes
-          (raise-unicorn-error err))))))
-
-(defmethod {start-emulation engine}
-  (lambda (self begin: begin         until: until
-                timeout: (timeout 0) count: (count 0))
-    (let (err (uc_emu_start (engine-uc self) begin until timeout count))
+(def (uc-open arch: arch mode: mode)
+  (let (uc** (make_uc_ptr_ptr))
+    (let (err (uc_open arch mode uc**))
       (unless (= err UC_ERR_OK)
-        (raise-unicorn-error err)))))
+        (raise-unicorn-error 'uc-open err))
+      (get_uc_ptr uc**))))
 
-(defmethod {stop-emultation engine}
-  (lambda (self)
-    (let (err (uc_emu_stop (engine-uc self)))
-      (unless (= err UC_ERR_OK)
-        (raise-unicorn-error err)))))
-
-(defmethod {add-hook engine}
-  (lambda (self hook-type callback
-                user-data: (user-data #f)
-                begin: (begin 1)
-                end:   (end 0)
-                arg1:  (arg1 0))
-    (let (data [self callback user-data])
-      (let (hook (uc_hook_add (engine-uc self) hook-type data begin end arg1))
-        (unless (= hook -1)
-          (hash-put! (engine-hooks self) hook hook))))))
-
-(defmethod {remove-hook engine}
-  (lambda (self hook)
-    (let (err (uc_hook_del (engine-uc self) hook))
-      (unless (= err UC_ERR_OK)
-        (raise-unicorn-error err)))))
-
-(defmethod {map-memory engine}
-  (lambda (self address size
-                all:   (all #f)   read:    (read #f)
-                write: (write #f) execute: (execute #f))
-    (def uc (engine-uc self))
-    (def perm
-      (bitwise-ior
-       (if all UC_PROT_ALL 0)
-       (if read UC_PROT_READ 0)
-       (if write UC_PROT_WRITE 0)
-       (if execute UC_PROT_EXEC 0)))
-    (def err (uc_mem_map uc address size perm))
+(def (uc-close uc)
+  (let (err (uc_close uc))
     (unless (= err UC_ERR_OK)
-      (raise-unicorn-error err))))
+      (raise-unicorn-error 'uc-close err))))
 
-(defmethod {unmap-memory engine}
-  (lambda (self address size)
-    (let (err (uc_mem_unmap (engine-uc self) address size))
+(def (call-with-emulator emulator f)
+  (parameterize ((uc-engine emulator))
+    (f)))
+
+(defsyntax (with-emulator stx)
+  (syntax-case stx ()
+    ((_ (arch: arch mode: mode) body ...)
+     #'(call-with-emulator
+        (uc-open arch: arch mode: mode)
+        (lambda ()
+          (unwind-protect
+            (begin body ...)
+            (uc-close (uc-engine))))))
+    ((_ expr body ...)
+     #'(call-with-emulator expr (lambda () body ...)))))
+
+(def* write-register
+  ((register value)
+   (write-register (uc-engine) register value))
+  ((uc register value)
+   (let (err (uc_reg_write uc register value))
+     (unless (= err UC_ERR_OK)
+       (raise-unicorn-error 'write-register err)))))
+
+(def* read-register
+  ((register) (read-register (uc-engine) register))
+  ((uc register)
+   (let (val (make_reg_val))
+     (let (err (uc_reg_read uc register val))
+       (unless (= err UC_ERR_OK)
+         (raise-unicorn-error 'read-register err))
+       (get_reg_val val)))))
+
+(def* write-memory
+  ((address bytes)
+   (write-memory (uc-engine) address bytes))
+  ((uc address bytes)
+   (let (err (uc_mem_write uc address bytes))
+     (unless (= err UC_ERR_OK)
+       (raise-unicorn-error 'write-memory err)))))
+
+(def* read-memory
+  ((address size)
+   (read-memory (uc-engine) address size))
+  ((uc address size)
+   (let (bytes (make-u8vector size))
+     (let (err (uc_mem_read uc address bytes))
+       (unless (= err UC_ERR_OK)
+         (raise-unicorn-error 'read-memory err))
+       bytes))))
+
+(def (start-emulation
+      begin: begin
+      until: until
+      timeout: (timeout 0)
+      count: (count 0))
+  (let (err (uc_emu_start (uc-engine) begin until timeout count))
+    (unless (= err UC_ERR_OK)
+      (raise-unicorn-error 'start-emulation err))))
+
+(def (stop-emulation)
+  (let (err (uc_emu_stop (uc-engine)))
+    (unless (= err UC_ERR_OK)
+      (raise-unicorn-error 'stop-emulation err))))
+
+(def (add-hook
+      hook-type callback
+      user-data: (user-data #f)
+      begin: (start 1)
+      end: (end 0)
+      arg1: (arg1 0))
+  (let ((data [(uc-engine) callback user-data])
+        (hook (make_hook)))
+    (let (err (uc_hook_add (uc-engine) hook hook-type data start end arg1))
       (unless (= err UC_ERR_OK)
-        (raise-unicorn-error err)))))
+        (raise-unicorn-error 'add-hook err))
+      hook)))
 
-(begin-ffi (uc_arch
-            uc_mode
-            uc_err
-            uc_version
+(def* remove-hook
+  ((hook) (remove-hook (uc-engine) hook))
+  ((uc hook)
+   (let (err (uc_hook_del uc hook))
+     (unless (= err UC_ERR_OK)
+       (raise-unicorn-error 'remove-hook err)))))
+
+(def (map-memory
+      address size
+      all:   (all #f)   read:    (read #f)
+      write: (write #f) execute: (execute #f))
+  (def perm
+    (bitwise-ior
+     (if all UC_PROT_ALL 0)
+     (if read UC_PROT_READ 0)
+     (if write UC_PROT_WRITE 0)
+     (if execute UC_PROT_EXEC 0)))
+  (let (err (uc_mem_map (uc-engine) address size perm))
+    (unless (= err UC_ERR_OK)
+      (raise-unicorn-error 'map-memory err))))
+
+(def* unmap-memory
+  ((address size)
+   (unmap-memory (uc-engine) address size))
+  ((uc address size)
+   (let (err (uc_mem_unmap uc address size))
+     (unless (= err UC_ERR_OK)
+       (raise-unicorn-error 'unmap-memory err)))))
+
+(begin-ffi (uc_version
             uc_arch_supported
-            uc_make_engine
+            make_uc_ptr_ptr
+            get_uc_ptr
+            make_hook
+            make_reg_val
+            get_reg_val
             uc_strerror
+            uc_open
+            uc_close
             uc_reg_write
             uc_reg_read
             uc_mem_write
@@ -300,20 +320,11 @@
     (let ((name (car name-and-c-name))
           (c-name (cadr name-and-c-name)))
       `(begin
-         (c-define-type ,name unsigned-int)
+         (c-define-type ,name int)
          ,@(map (lambda (enum) `(define-const ,enum)) enum-values))))
 
   (c-declare #<<END-C
 #include <unicorn/unicorn.h>
-#include <unicorn/x86.h>
-
-#ifndef __HAVE_FFI_U8VECTOR
-#define __HAVE_FFI_U8VECTOR
-#define U8_DATA(obj) ___CAST (___U8*, ___BODY_AS (obj, ___tSUBTYPED))
-#define U8_LEN(obj) ___HD_BYTES (___HEADER (obj))
-#endif
-
-static void ffi_uc_close(void *);
 
 END-C
 )
@@ -376,8 +387,21 @@ END-C
 
   (c-define-type uc_struct (struct "uc_struct"))
   (c-define-type uc_engine uc_struct)
-  (c-define-type uc_engine* (pointer uc_engine uc_engine* "ffi_uc_close"))
+  (c-define-type uc_engine* (pointer uc_engine))
+  (c-define-type uc_engine** (pointer uc_engine* (uc_engine**) "ffi_free"))
   (c-define-type uc_hook size_t)
+  (c-define-type uc_hook* (pointer uc_hook (uc_hook*) "ffi_free"))
+  (define-c-lambda make_hook () uc_hook*
+    "___return ((uc_hook*) malloc(sizeof(uc_hook)));")
+  (define-c-lambda make_uc_ptr_ptr () uc_engine**
+    "___return ((uc_engine **) malloc(sizeof(uc_engine*)));")
+  (define-c-lambda get_uc_ptr (uc_engine**) uc_engine*
+    "___return (*___arg1);")
+  (c-define-type register-value* (pointer unsigned-int64 (register-value*) "ffi_free"))
+  (define-c-lambda make_reg_val () register-value*
+    "___return ((uint64_t*) malloc(sizeof(uint64_t)));")
+  (define-c-lambda get_reg_val (register-value*) unsigned-int64
+    "___return (*((uint64_t*)___arg1));")
 
   (defenum (uc_mem_type "uc_mem_type")
     UC_MEM_READ
@@ -441,8 +465,8 @@ END-C
     "___return (uc_version(NULL, NULL));")
   (define-c-lambda uc_arch_supported (uc_arch) bool
     "uc_arch_supported")
-  (define-c-lambda uc_make_engine (uc_arch uc_mode) uc_engine*
-    "ffi_uc_make_engine")
+  (define-c-lambda uc_open (uc_arch uc_mode uc_engine**) uc_err
+    "uc_open")
   (define-c-lambda uc_close (uc_engine*) uc_err
     "uc_close")
   ;; (define-c-lambda uc_query (uc_engine* uc_query_type) size_t
@@ -453,19 +477,20 @@ END-C
     "uc_strerror")
   (define-c-lambda uc_reg_write (uc_engine* int unsigned-int64) uc_err
     "ffi_uc_reg_write")
-  (define-c-lambda uc_reg_read (uc_engine* int) unsigned-int64
-    "ffi_uc_reg_read")
+  (define-c-lambda uc_reg_read (uc_engine* int register-value*) uc_err
+    "uc_reg_read")
   (define-c-lambda uc_mem_write (uc_engine* unsigned-int64 scheme-object) uc_err
     "ffi_uc_mem_write")
-  (define-c-lambda uc_mem_read (uc_engine* unsigned-int64 scheme-object size_t) uc_err
+  (define-c-lambda uc_mem_read (uc_engine* unsigned-int64 scheme-object) uc_err
     "ffi_uc_mem_read")
   (define-c-lambda uc_emu_start (uc_engine* unsigned-int64 unsigned-int64 unsigned-int64 size_t)
     uc_err
     "uc_emu_start")
   (define-c-lambda uc_emu_stop (uc_engine*) uc_err
     "uc_emu_stop;")
-  (define-c-lambda uc_hook_add (uc_engine* int scheme-object unsigned-int64 unsigned-int64 int)
-    uc_hook
+  (define-c-lambda uc_hook_add
+    (uc_engine* uc_hook* uc_hook_type scheme-object unsigned-int64 unsigned-int64 int)
+    uc_err
     "ffi_uc_hook_add")
   (define-c-lambda uc_hook_del (uc_engine* uc_hook) uc_err
     "uc_hook_del")
@@ -526,32 +551,15 @@ END-C
 
 (c-declare #<<END-C
 
-static uc_engine *ffi_uc_make_engine(uc_arch arch, uc_mode mode)
-{
- uc_engine *engine;
- if (uc_open(arch, mode, &engine) != UC_ERR_OK)
-  return ((uc_engine*)NULL);
- else
-  return engine;
-}
-
 static uc_err ffi_uc_reg_write(uc_engine *uc, int regid, uint64_t value)
 {
  void *val = (void *) &value;
  return uc_reg_write(uc, regid, val);
 }
 
-static ___SCMOBJ ffi_uc_reg_read(uc_engine *uc, int regid)
-{
- uint64_t val;
- uc_reg_read(uc, regid, &val);
- return val;
-}
-
-static uc_hook ffi_uc_hook_add(uc_engine *uc, int type, ___SCMOBJ user_data,
+static uc_err ffi_uc_hook_add(uc_engine *uc, uc_hook *hook, int type, ___SCMOBJ user_data,
  uint64_t begin, uint64_t end, int arg1)
 {
- uc_hook hook;
  uc_err err;
  void *callback;
  if (type == UC_HOOK_INTR) {
@@ -573,9 +581,7 @@ static uc_hook ffi_uc_hook_add(uc_engine *uc, int type, ___SCMOBJ user_data,
  } else {
   callback = hookmem_cb;
  }
- if ((err = uc_hook_add(uc, &hook, type, callback, user_data, begin, end, arg1)) != UC_ERR_OK)
-   return -1;
- return hook;
+ return uc_hook_add(uc, hook, type, callback, (void *) user_data, begin, end, arg1);
 }
 
 static uc_err ffi_uc_mem_write(uc_engine *uc, uint64_t address, ___SCMOBJ bytes)
@@ -583,16 +589,9 @@ static uc_err ffi_uc_mem_write(uc_engine *uc, uint64_t address, ___SCMOBJ bytes)
  return uc_mem_write(uc, address, U8_DATA(bytes), U8_LEN(bytes));
 }
 
-static uc_err ffi_uc_mem_read(uc_engine *uc, uint64_t address, ___SCMOBJ bytes, size_t size)
+static uc_err ffi_uc_mem_read(uc_engine *uc, uint64_t address, ___SCMOBJ bytes)
 {
- return uc_mem_read(uc, address, U8_DATA(bytes), size);
-}
-
-static void ffi_uc_close(void *ptr)
-{
- uc_engine *uc = (uc_engine*) ptr;
- uc_close(uc);
- return;
+ return uc_mem_read(uc, address, U8_DATA(bytes), U8_LEN(bytes));
 }
 
 END-C
