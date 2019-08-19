@@ -8,6 +8,7 @@
 (export version
         version-string
         architecture-supported?
+        unicorn-error?
         uc-open
         uc-close
         with-emulator
