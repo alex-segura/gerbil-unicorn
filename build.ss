@@ -26,6 +26,9 @@
           "-ld-options" ,ld-options)
     (gxc: "sparc"
           "-cc-options" ,cc-options
+          "-ld-options" ,ld-options)
+    (gxc: "m68k"
+          "-cc-options" ,cc-options
           "-ld-options" ,ld-options)))
 
 (def srcdir
