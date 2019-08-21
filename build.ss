@@ -23,6 +23,9 @@
           "-ld-options" ,ld-options)
     (gxc: "mips"
           "-cc-options" ,cc-options
+          "-ld-options" ,ld-options)
+    (gxc: "sparc"
+          "-cc-options" ,cc-options
           "-ld-options" ,ld-options)))
 
 (def srcdir
