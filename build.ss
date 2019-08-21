@@ -20,6 +20,9 @@
           "-ld-options" ,ld-options)
     (gxc: "x86"
           "-cc-options" ,cc-options
+          "-ld-options" ,ld-options)
+    (gxc: "mips"
+          "-cc-options" ,cc-options
           "-ld-options" ,ld-options)))
 
 (def srcdir
