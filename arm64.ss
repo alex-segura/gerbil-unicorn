@@ -550,7 +550,7 @@
     (let ((name (car name-and-c-name))
           (c-name (cadr name-and-c-name)))
       `(begin
-         (c-define-type ,name unsigned-int)
+         (c-define-type ,name int)
          ,@(map (lambda (enum) `(define-const ,enum)) enum-values))))
 
   (c-declare "#include <unicorn/arm64.h>")
